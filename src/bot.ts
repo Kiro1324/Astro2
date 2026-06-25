@@ -1,17 +1,19 @@
-import { Client, GatewayIntentBits, EmbedBuilder, Guild, Message, GuildMember, Role, ColorResolvable, MessageReaction, User, Colors, Collection, GuildTextBasedChannel, Routes, REST, SlashCommandOptionsOnlyBuilder, ChatInputCommandInteraction, PartialMessage } from 'discord.js';
-import { GreeterRole, SFAcorp, adminRole, auditlogchannel, logchannel, prefix, recapchannel, representativerole, rseventlogchannel, scorekeeperrole, welcomechannel } from '../config/config.js';
+import { Client, GatewayIntentBits, EmbedBuilder, Guild, Message, GuildMember, Role, ColorResolvable, MessageReaction, User, Colors, Collection, GuildTextBasedChannel, Routes, REST, SlashCommandOptionsOnlyBuilder, ChatInputCommandInteraction, PartialMessage, Events } from 'discord.js';
+import { GreeterRole, SFAcorp, auditlogchannel, logchannel, prefix, representativerole, welcomechannel } from '../config/config.js';
 import { autoresponsecheck } from './modules/autoresponse.js';
 import { commandGroup } from './modules/command.js';
 import { initDB, queryDB } from "./modules/DB.js"
 import { initHelp } from './modules/help.js';
 import { initAFKTimeoutCheckLoop, initRS } from './modules/redstar.js';
+import { channelCreateHandler, channelUpdateHandler } from './modules/redstar/handlers.js';
 import { initstats } from './modules/stats.js';
 import { initRole } from './modules/role.js';
 import { initUser } from './modules/user.js';
-import { handleRecap, initWS, initWSCommands } from './modules/whitestar.js';
+import { initWS, initWSCommands } from './modules/whitestar.js';
 import { initmisc } from './modules/misc.js';
 import { config } from 'dotenv';
-import { handleLog, handleReject, handleRun, handleSolo, handleVerify, handleVoid, initevent, initeventCommands } from './modules/event.js';
+import { initevent, initeventCommands } from './modules/event.js';
+import { interactionHandler } from './interactions.js';
 
 //global cached variables
 let SFA_Guild: Guild;
@@ -20,7 +22,7 @@ let BaseCommandGroup = new commandGroup("", [], [], [], "", false)
 let memberCache: Collection<string, GuildMember>
 let lastMemberUpdate = 0
 
-const bot = new Client<true>({
+const bot = new Client({
     intents:
         [GatewayIntentBits.Guilds, GatewayIntentBits.GuildMessages, GatewayIntentBits.MessageContent, GatewayIntentBits.GuildMembers, GatewayIntentBits.GuildMessageReactions, GatewayIntentBits.DirectMessages]
 })
@@ -34,7 +36,7 @@ const rest = new REST().setToken(token);
 bot.login(token);
 
 //Initializes all systems and cached variables
-bot.once('ready', () => {
+bot.once('ready', (readyClient) => {
     console.log("online!")
 
     initDB()
@@ -49,7 +51,7 @@ bot.once('ready', () => {
     const commands = [initeventCommands(), initWSCommands()].flat()
     refreshCommands(commands)
     initAFKTimeoutCheckLoop()
-    bot.guilds.fetch(SFAcorp)
+    readyClient.guilds.fetch(SFAcorp)
         .then(guild => {
             SFA_Guild = guild
             SFA_Guild.members.fetch()
@@ -170,81 +172,10 @@ bot.on("messageCreate", (message) => {
     }
 })
 
-//Handles Slash commands and Buttons. This code is awful and the first thing that needs to be redone if adding more commands/buttons
-bot.on("interactionCreate", async interaction => {
-    if (interaction.isButton()) {
-        const member = await fetchMember(interaction.user.id)
-        if (member.roles.cache.some(role => role.id === scorekeeperrole || role.id === adminRole)) {
-            const d = Date.now()
-            interaction.deferReply({ ephemeral: true }).then(() => {
-                if (interaction.customId === 'verify') {
-                    handleVerify(interaction)
-                }
-                else if (interaction.customId === 'reject') {
-                    handleReject(interaction)
-                }
-                else if (interaction.customId === 'void') {
-                    handleVoid(interaction)
-                }
-            })
-                .catch(err => {
-                    console.log(err)
-                    sendMessage(interaction.channelId, `<@${interaction.user.id}> unfortunately, a critical latency error occured while processing this request. Please click the button again.`)
-                })
-        }
-        else {
-            interaction.reply({ content: 'You do not have the necessary permission to use this command', ephemeral: true })
-        }
-    }
-    else if (interaction.isChatInputCommand()) {
-        let func: (interaction: ChatInputCommandInteraction) => void = (interaction: ChatInputCommandInteraction) => { }
-        let eventcommand = false
-        let recapcommand = false
-        switch (interaction.commandName) {
-            case "log":
-                func = handleLog
-                eventcommand = true
-                break
-            case "solo":
-                func = handleSolo
-                eventcommand = true
-                break
-            case "run":
-                func = handleRun
-                eventcommand = true
-                break
-            case "recap":
-                func = handleRecap
-                recapcommand = true
-                break
-        }
+bot.on(Events.InteractionCreate, async (interaction) => interactionHandler(interaction))
 
-        //Channel restrictions based on command type
-        if (eventcommand) {
-            queryDB("SELECT event FROM config")
-                .then(event => {
-                    if (event[0].event !== 0) {
-                        if (interaction.channelId !== rseventlogchannel) interaction.reply({ content: `This is not the correct channel for this command. Use <#${rseventlogchannel}>`, ephemeral: true })
-                        else {
-                            interaction.deferReply().then(() => {
-                                func(interaction)
-                            }).catch(err => {
-                                sendMessage(interaction.channelId, `<@${interaction.user.id}> unfortunately, a critical latency error occured while processing this request. Please resubmit the entire command.`)
-                            })
-                        }
-                    }
-                    else if (interaction.isRepliable()) {
-                        interaction.reply({ content: 'There is no ongoing RS Event at the moment, all related commands have been disabled.', ephemeral: true })
-                    }
-                })
-        }
-        else if (recapcommand) {
-            if (interaction.channelId !== recapchannel) interaction.reply({ content: `This is not the correct channel for this command. Use <#${recapchannel}>`, ephemeral: true })
-            else func(interaction)
-        }
-    }
-
-})
+bot.on(Events.ChannelCreate, channelCreateHandler);
+bot.on(Events.ChannelUpdate, channelUpdateHandler);
 
 /**
  * Checks if a Message is a partial type and fetches the full information if it is
